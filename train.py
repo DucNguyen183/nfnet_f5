@@ -90,7 +90,7 @@ def train(config:dict) -> None:
     # Find desired parameters and exclude them 
     # from weight decay and clipping
     for group in optimizer.param_groups:
-        name = group['name'] 
+        name = group['name']
         
         if model.exclude_from_weight_decay(name):
             group['weight_decay'] = 0
@@ -170,15 +170,15 @@ def train(config:dict) -> None:
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser(description='Train NFNets.')
-    parser.add_argument('--config', type=Path, help='Path to config.yaml', default='default_config.yaml')
+    # parser.add_argument('--config', type=Path, help='Path to config.yaml', default='default_config.yaml')
     parser.add_argument('--batch-size', type=int, help='Training batch size', default=None)
     parser.add_argument('--overfit', const=True, default=False, nargs='?', help='Crop the dataset to the batch size and force model to (hopefully) overfit')
     parser.add_argument('--variant', type=str, help='NFNet variant to train', default=None)
-    parser.add_argument('--pretrained', type=Path, help='Path to pre-trained weights in haiku format', default=None)
+    # parser.add_argument('--pretrained', type=Path, help='Path to pre-trained weights in haiku format', default=None)
     args = parser.parse_args()
-    
+    config = 'default_config.yaml'
     if not args.config.exists():
-        print(f"Config file \"{args.config}\" does not exist!\n")
+        print(f"Config file \"{config}\" does not exist!\n")
         exit()
 
     with args.config.open() as file:
@@ -188,7 +188,7 @@ if __name__=='__main__':
     for arg in vars(args):
         if getattr(args, arg) is not None and arg in config:
             config[arg] = getattr(args, arg)
-
-    config['pretrained'] = args.pretrained
+    pretrained = 'pretrained/F5_haiku.npz'
+    config['pretrained'] = pretrained
 
     train(config=config)

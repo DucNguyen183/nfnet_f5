@@ -5,7 +5,8 @@ import time
 import yaml
 from pathlib import Path
 from PIL.Image import Image
-
+import copy
+import datetime
 import matplotlib.pyplot as plt
 import torch
 import torch.cuda.amp as amp
@@ -18,8 +19,13 @@ from torchvision.transforms.transforms import Compose, Normalize, Resize, ToTens
 
 from dataset import get_dataset
 from nfnets import NFNet, SGD_AGC, pretrained_nfnet
+import os
+
 
 def train(config:dict) -> None:
+    model_path = 'model/'
+    if not os.path.exists(model_path):
+        os.mkdir(model_path)
     if config['device'].startswith('cuda'):
         if torch.cuda.is_available():
             print(f"Using CUDA{torch.version.cuda} with cuDNN{torch.backends.cudnn.version()}")
@@ -43,26 +49,9 @@ def train(config:dict) -> None:
             activation=config['activation']
             )
 
-    transforms = Compose([
-        RandomHorizontalFlip(),
-        Resize((model.train_imsize, model.train_imsize), PIL.Image.BICUBIC),
-        ToTensor(),
-        Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-
     device = config['device']
-    dataset = get_dataset(path=config['dataset'], transforms=transforms)
-    
-    if config['overfit']:
-        dataset = Subset(dataset, [i*50 for i in range(0,1000)] )
 
-    dataloader = DataLoader(
-        dataset=dataset, 
-        batch_size=config['batch_size'],
-        shuffle=True,
-        num_workers=config['num_workers'], 
-        pin_memory=config['pin_memory'])
-
+    dataloader = get_dataset(config['dataset'], model.train_imsize, config['batch_size'])
     if config['scale_lr']:
         learning_rate = config['learning_rate']*config['batch_size']/256
     else:
@@ -111,62 +100,46 @@ def train(config:dict) -> None:
 
     writer = SummaryWriter(str(runs_dir))
     scaler = amp.GradScaler()
-
+    tic = time.time()
+    best_acc = 0.0
+    best_model_wts = copy.deepcopy(model.state_dict())
     for epoch in range(config['epochs']):
-        model.train()
-        running_loss = 0.0
-        processed_imgs = 0
-        correct_labels = 0
-        epoch_time = time.time()
+        print("{} epoch {}:".format(datetime.datetime.now(), epoch))
+        for phase in ['train', 'val']:
+            running_loss = 0.0
+            correct_labels = 0
+            epoch_time = time.time()
+            if phase == 'train':
+                model.train()
+            else:
+                model.eval()
+            for data, target in dataloader[phase]:
+                inputs = data.half().to(device) if config['use_fp16'] else data.to(device)
+                targets = target.to(device)
 
-        for step, data in enumerate(dataloader):
-            inputs = data[0].half().to(device) if config['use_fp16'] else data[0].to(device)
-            targets = data[1].to(device)
+                optimizer.zero_grad()
 
-            optimizer.zero_grad()
+                with amp.autocast(enabled=config['amp']):
+                    output = model(inputs)
+                loss = criterion(output, targets)
+                if phase == 'train':
+                    loss.backward()
+                    optimizer.step()
 
-            with amp.autocast(enabled=config['amp']):
-                output = model(inputs)
-            loss = criterion(output, targets)
-            
-            # Gradient scaling
-            # https://www.youtube.com/watch?v=OqCrNkjN_PM
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+                running_loss += loss.item()*inputs.size(0)
+                _, predicted = torch.max(output, 1)
+                correct_labels += (predicted == targets).sum().item()
 
-            running_loss += loss.item()
-            processed_imgs += targets.size(0)
-            _, predicted = torch.max(output, 1)
-            correct_labels += (predicted == targets).sum().item()
+            epoch_loss = running_loss/len(dataloader[phase].dataset)
+            epoch_accuracy = 100. * correct_labels / len(dataloader[phase].dataset)
 
-            epoch_padding = int(math.log10(config['epochs']) + 1)
-            batch_padding = int(math.log10(len(dataloader.dataset)) + 1)
-            print(f"\rEpoch {epoch+1:0{epoch_padding}d}/{config['epochs']}"
-                f"\tImg {processed_imgs:{batch_padding}d}/{len(dataloader.dataset)}"
-                f"\tLoss {running_loss / (step+1):6.4f}"
-                f"\tAcc {100.0*correct_labels/processed_imgs:5.3f}%\t",
-            sep=' ', end='', flush=True)
+            print('{} Loss: {:.4f} Acc: {:.4f}'.format(phase, epoch_loss, epoch_accuracy))
+            if phase == 'val' and epoch_accuracy > best_acc:
+                best_acc = epoch_accuracy
+                best_model_wts = copy.deepcopy(model.state_dict())
+                torch.save(model.state_dict(), model_path + 'id_classify_nfnet_F5.pt')
+        print("=============================================")
 
-        elapsed = time.time() - epoch_time
-        print (f"({elapsed:.3f}s, {elapsed/len(dataloader):.3}s/step, {elapsed/len(dataset):.3}s/img)")
-
-        global_step = epoch*len(dataloader) + step
-        writer.add_scalar('training/loss', running_loss/(step+1), global_step)
-        writer.add_scalar('training/accuracy', 100.0*correct_labels/processed_imgs, global_step)
-
-        #if not config['overfit']:
-        if epoch % 10 == 0 and epoch != 0:
-            cp_path = checkpoints_dir / ("checkpoint_epoch" + str(epoch+1) + ".pth")
-
-            torch.save({
-                'epoch': epoch,
-                'model': model.state_dict(),
-                'optim': optimizer.state_dict(),
-                'loss': loss
-            }, str(cp_path))
-
-            print(f"Saved checkpoint to {str(cp_path)}")
 
 if __name__=='__main__':
     parser = argparse.ArgumentParser(description='Train NFNets.')
